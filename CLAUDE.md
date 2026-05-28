@@ -14,9 +14,6 @@ make mago-lint       # lint checks
 make mago-analyze    # static analysis (PHP 8.0, includes WP stubs)
 ```
 
-Use the make targets instead of running Mago directly. Each target verifies that the installed Mago version matches the `carthage-software/mago` version locked in `composer.lock` before executing.
-
-Mago config is in `mago.toml`. Source paths: `includes/` and `novamira.php`. WordPress stubs are in `vendor/php-stubs/wordpress-stubs` and `stubs/`.
-
+Use the make targets instead of running Mago directly. Ensure no issues or warnings of any kind when you commit. Also fix any previous unrelated issues you find.
 
 NEVER modify release-info.json by hand unless explicitly instructed to do so, that is modified programmatically
