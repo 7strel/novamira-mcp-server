@@ -323,7 +323,6 @@ function novamira_register_admin_bar_toggle(\WP_Admin_Bar $wp_admin_bar): void
             $configured_enabled => esc_html__('AI Abilities: Error', domain: 'novamira'),
             default => esc_html__('AI Abilities: Off', domain: 'novamira'),
         },
-        'href' => false,
     ]);
 
     if (!$can_enable) {

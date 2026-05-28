@@ -641,7 +641,9 @@ function novamira_user_can_manage(int|WP_User $user): bool
         return false;
     }
 
-    return is_multisite() ? is_super_admin($user_id) : user_can($user, 'manage_options');
+    $manage_capability = 'manage_options';
+
+    return is_multisite() ? is_super_admin($user_id) : user_can($user, $manage_capability);
 }
 
 /**

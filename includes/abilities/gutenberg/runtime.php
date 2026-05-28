@@ -238,9 +238,11 @@ function finalizer_runtime_user_can_finalize_batch(int $user_id, WP_Post $batch)
         return true;
     }
 
+    $edit_post_capability = 'edit_post';
+
     foreach (get_items($batch->ID) as $item) {
         $target_id = meta_int($item->ID, META_TARGET_ID);
-        if ($target_id <= 0 || !user_can($user_id, 'edit_post', $target_id)) {
+        if ($target_id <= 0 || !user_can($user_id, $edit_post_capability, $target_id)) {
             return false;
         }
     }
