@@ -1134,7 +1134,7 @@ function novamira_render_config_section(string $rest_url, string $username, stri
             aria-expanded="false"
             aria-controls="novamira-npxless-config"
             onclick="novamiraToggleNpxlessConfig(this)"
-        ><?php esc_html_e('Need a configuration not requiring npx?', domain: 'novamira'); ?></button>
+        ><?php esc_html_e('Configs above not working? Try this npx-free alternative.', domain: 'novamira'); ?></button>
     </p>
 
     <div id="novamira-npxless-config" hidden style="display:none;">
@@ -1150,7 +1150,7 @@ function novamira_render_config_section(string $rest_url, string $username, stri
                 type="button"
                 class="novamira-client-tab novamira-npxless-client-tab active"
                 onclick="novamiraSetNpxlessClient('claude', this)"
-            ><?php esc_html_e('Claude', domain: 'novamira'); ?></button>
+            ><?php esc_html_e('Claude Code', domain: 'novamira'); ?></button>
             <button
                 type="button"
                 class="novamira-client-tab novamira-npxless-client-tab"
