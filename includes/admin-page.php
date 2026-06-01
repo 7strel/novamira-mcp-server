@@ -10,57 +10,367 @@ if (!defined('ABSPATH')) {
 }
 
 /**
- * Collects every public MCP tool ability registered on the site, grouped by source.
+ * Collect every registered ability, grouped by ability prefix.
  *
- * The source label is resolved per-ability via the `novamira_ability_source_label`
- * filter (default: "Novamira"), so add-ons can contribute rows under their own
- * heading. Within a group, rows are sorted by category then name. Groups are
- * returned with the default source first, other sources sorted alphabetically.
+ * Disabled abilities are usually absent from the registry after the policy hook,
+ * so persisted disabled rules are merged back in as placeholder rows.
  *
- * @return array<string, list<array{name: string, category: string, description: string}>>
+ * @return array<string, list<array{name: string, label: string, description: string, category: string, mcp: string, mcp_type: string, status: string, disabled: bool, protected: bool}>>
  */
-function novamira_collect_public_abilities(): array
+function novamira_collect_ability_hub_rows(): array
 {
-    $default_source = __('Novamira', domain: 'novamira');
-    $groups = [];
-    foreach (wp_get_abilities() as $ability) {
-        $name = $ability->get_name();
-        if (!str_starts_with($name, 'novamira/')) {
-            continue;
-        }
-        $meta = $ability->get_meta();
-        if (!($meta['mcp']['public'] ?? false)) {
-            continue;
-        }
-        if (($meta['mcp']['type'] ?? 'tool') !== 'tool') {
-            continue;
-        }
-        $category_slug = $ability->get_category();
-        $category = $category_slug !== '' ? wp_get_ability_category($category_slug) : null;
-        /** @var string $source */
-        $source = apply_filters('novamira_ability_source_label', $default_source, $ability);
-        $groups[$source] ??= [];
-        $groups[$source][] = [
-            'name' => $name,
-            'category' => $category !== null ? $category->get_label() : $category_slug,
-            'description' => $ability->get_description(),
-        ];
-    }
-    foreach ($groups as $source => $rows) {
-        usort(
-            $rows,
-            static fn(array $a, array $b): int => [$a['category'], $a['name']] <=> [$b['category'], $b['name']],
-        );
-        $groups[$source] = $rows;
+    if (!function_exists('wp_get_abilities')) {
+        return [];
     }
 
-    $sorted = [];
-    if (array_key_exists($default_source, $groups)) {
-        $sorted[$default_source] = $groups[$default_source];
-        unset($groups[$default_source]);
+    $rules = novamira_get_ability_rules();
+    $groups = [];
+    $seen = [];
+
+    foreach (wp_get_abilities() as $ability) {
+        $row = novamira_build_registered_ability_row($ability, $rules);
+        if ($row === null) {
+            continue;
+        }
+        $seen[$row['name']] = true;
+        $groups[novamira_ability_prefix($row['name'])][] = $row;
     }
-    ksort($groups);
-    return $sorted + $groups;
+
+    $groups = novamira_append_disabled_ability_rows($groups, $rules, $seen);
+
+    foreach ($groups as $source => $rows) {
+        usort($rows, static fn(array $a, array $b): int => [$a['name']] <=> [$b['name']]);
+        $groups[$source] = $rows;
+    }
+    uksort($groups, static function (string $a, string $b): int {
+        $rank = novamira_ability_hub_group_rank($a) <=> novamira_ability_hub_group_rank($b);
+        return $rank !== 0 ? $rank : strcasecmp($a, $b);
+    });
+
+    return $groups;
+}
+
+/**
+ * Build a hub row for a registered ability, or null when it is hidden or not exposed.
+ *
+ * @param array<string, array{disabled: bool}> $rules
+ * @return array{name: string, label: string, description: string, category: string, mcp: string, mcp_type: string, status: string, disabled: bool, protected: bool}|null
+ */
+function novamira_build_registered_ability_row(WP_Ability $ability, array $rules): ?array
+{
+    $name = $ability->get_name();
+    if (novamira_ability_is_hub_hidden($name)) {
+        return null;
+    }
+    $meta = $ability->get_meta();
+    if (!novamira_ability_is_exposed($meta)) {
+        return null;
+    }
+
+    $protected = novamira_ability_is_hub_protected($name);
+    $disabled = !$protected && ($rules[$name]['disabled'] ?? false);
+    $category_slug = $ability->get_category();
+    $category = $category_slug !== '' ? wp_get_ability_category($category_slug) : null;
+
+    return [
+        'name' => $name,
+        'label' => $ability->get_label(),
+        'description' => $ability->get_description(),
+        'category' => $category !== null ? $category->get_label() : $category_slug,
+        'mcp' => novamira_format_ability_mcp_meta($meta),
+        'mcp_type' => novamira_ability_mcp_type($meta),
+        'status' => $disabled ? __('Disabled', domain: 'novamira') : __('Enabled', domain: 'novamira'),
+        'disabled' => $disabled,
+        'protected' => $protected,
+    ];
+}
+
+/**
+ * Merge persisted disabled rules back in as placeholder rows for abilities that
+ * are no longer registered (disabled abilities are absent after the policy hook).
+ *
+ * @param array<string, list<array{name: string, label: string, description: string, category: string, mcp: string, mcp_type: string, status: string, disabled: bool, protected: bool}>> $groups
+ * @param array<string, array{disabled: bool}> $rules
+ * @param array<string, bool> $seen
+ * @return array<string, list<array{name: string, label: string, description: string, category: string, mcp: string, mcp_type: string, status: string, disabled: bool, protected: bool}>>
+ */
+function novamira_append_disabled_ability_rows(array $groups, array $rules, array $seen): array
+{
+    foreach ($rules as $name => $rule) {
+        if (novamira_ability_is_hub_hidden($name) || array_key_exists($name, $seen) || !$rule['disabled']) {
+            continue;
+        }
+        $groups[novamira_ability_prefix($name)][] = [
+            'name' => $name,
+            'label' => __('Previously registered ability', domain: 'novamira'),
+            'description' => '',
+            'category' => '',
+            'mcp' => __('Unknown', domain: 'novamira'),
+            'mcp_type' => '',
+            'status' => __('Disabled', domain: 'novamira'),
+            'disabled' => true,
+            'protected' => novamira_ability_is_hub_protected($name),
+        ];
+    }
+
+    return $groups;
+}
+
+function novamira_ability_prefix(string $ability_name): string
+{
+    $parts = explode('/', $ability_name, limit: 2);
+    return $parts[0] !== '' ? $parts[0] : __('Other', domain: 'novamira');
+}
+
+/**
+ * The ability name without its provider prefix. The provider is already the
+ * group header, so repeating it on every row is noise.
+ */
+function novamira_ability_display_slug(string $ability_name): string
+{
+    $parts = explode('/', $ability_name, limit: 2);
+    return ($parts[1] ?? '') !== '' ? $parts[1] : $ability_name;
+}
+
+/**
+ * Sort rank for an ability group header: the "novamira" provider first, then
+ * every other provider (the caller breaks ties alphabetically).
+ */
+function novamira_ability_hub_group_rank(string $source): int
+{
+    return $source === 'novamira' ? 0 : 1;
+}
+
+function novamira_ability_is_hub_hidden(string $ability_name): bool
+{
+    return str_starts_with($ability_name, 'mcp-adapter/');
+}
+
+/**
+ * An ability is exposed when its MCP metadata marks it public.
+ *
+ * @param array<string, mixed> $meta
+ */
+function novamira_ability_is_exposed(array $meta): bool
+{
+    /** @var mixed $mcp */
+    $mcp = $meta['mcp'] ?? null;
+    return is_array($mcp) && ($mcp['public'] ?? false) === true;
+}
+
+/**
+ * @param array<string, mixed> $meta
+ */
+function novamira_format_ability_mcp_meta(array $meta): string
+{
+    /** @var mixed $mcp */
+    $mcp = $meta['mcp'] ?? null;
+    if (!is_array($mcp)) {
+        return __('Unknown', domain: 'novamira');
+    }
+
+    return (string) ($mcp['type'] ?? 'tool');
+}
+
+/**
+ * Raw MCP exposure type ('tool', 'resource' or 'prompt') for pill logic, kept
+ * separate from the translated display label.
+ *
+ * @param array<string, mixed> $meta
+ */
+function novamira_ability_mcp_type(array $meta): string
+{
+    /** @var mixed $mcp */
+    $mcp = $meta['mcp'] ?? null;
+    if (!is_array($mcp)) {
+        return 'tool';
+    }
+    /** @var mixed $type */
+    $type = $mcp['type'] ?? '';
+    return $type === 'resource' || $type === 'prompt' ? $type : 'tool';
+}
+
+function novamira_handle_ability_hub_actions(): void
+{
+    if (($_POST['novamira_ability_hub_action'] ?? null) === null) {
+        return;
+    }
+
+    if (!novamira_current_user_can_manage()) {
+        return;
+    }
+
+    check_admin_referer('novamira_ability_hub_action');
+
+    $action = is_string($_POST['novamira_ability_hub_action'] ?? null)
+        ? sanitize_key(wp_unslash($_POST['novamira_ability_hub_action']))
+        : '';
+
+    if ($action === 'bulk_update') {
+        novamira_handle_ability_hub_bulk_action();
+        return;
+    }
+
+    $ability_name = is_string($_POST['ability_name'] ?? null)
+        ? sanitize_text_field(wp_unslash($_POST['ability_name']))
+        : '';
+
+    if (!novamira_is_valid_ability_name($ability_name)) {
+        wp_safe_redirect(admin_url('admin.php?page=novamira-abilities&novamira_result=invalid'));
+        exit();
+    }
+
+    $rules = novamira_get_ability_rules();
+    $rules[$ability_name] ??= ['disabled' => false];
+
+    $rules = novamira_apply_ability_hub_action_to_rules($rules, $ability_name, $action);
+
+    novamira_update_ability_rules($rules);
+    wp_safe_redirect(admin_url('admin.php?page=novamira-abilities&novamira_result=updated'));
+    exit();
+}
+
+/**
+ * AJAX endpoint for the single-row enable/disable toggle. Mirrors the POST path
+ * but responds with JSON so the page does not reload (preserving open sections).
+ * The browser falls back to the plain form submit if this request fails.
+ */
+function novamira_handle_ability_toggle_ajax(): void
+{
+    if (!novamira_current_user_can_manage()) {
+        wp_send_json_error(['message' => __('Permission denied.', domain: 'novamira')], status_code: 403);
+    }
+
+    if (!check_ajax_referer('novamira_ability_hub_action', query_arg: false, stop: false)) {
+        wp_send_json_error(['message' => __(
+            'Your session expired. Reload the page.',
+            domain: 'novamira',
+        )], status_code: 403);
+    }
+
+    $ability_name = is_string($_POST['ability_name'] ?? null)
+        ? sanitize_text_field(wp_unslash($_POST['ability_name']))
+        : '';
+
+    if (!novamira_is_valid_ability_name($ability_name) || novamira_ability_is_hub_hidden($ability_name)) {
+        wp_send_json_error(['message' => __('Invalid ability name.', domain: 'novamira')], status_code: 400);
+    }
+
+    if (novamira_ability_is_hub_protected($ability_name)) {
+        wp_send_json_error(['message' => __('This ability cannot be changed.', domain: 'novamira')], status_code: 403);
+    }
+
+    $rules = novamira_get_ability_rules();
+    $rules[$ability_name] ??= ['disabled' => false];
+    $rules = novamira_toggle_ability_disabled_rule($rules, $ability_name);
+    novamira_update_ability_rules($rules);
+
+    $disabled = $rules[$ability_name]['disabled'] === true;
+    wp_send_json_success([
+        'disabled' => $disabled,
+        'status' => $disabled ? __('Disabled', domain: 'novamira') : __('Enabled', domain: 'novamira'),
+        'button' => $disabled ? __('Enable', domain: 'novamira') : __('Disable', domain: 'novamira'),
+    ]);
+}
+
+function novamira_handle_ability_hub_bulk_action(): void
+{
+    $bulk_action = novamira_get_ability_hub_bulk_action();
+    $ability_names = novamira_get_ability_hub_bulk_ability_names();
+    if ($bulk_action === '' || $ability_names === []) {
+        wp_safe_redirect(admin_url('admin.php?page=novamira-abilities&novamira_result=invalid'));
+        exit();
+    }
+
+    $rules = novamira_get_ability_rules();
+    foreach ($ability_names as $ability_name) {
+        $rules[$ability_name] ??= ['disabled' => false];
+        $rules = novamira_apply_ability_hub_bulk_action_to_rules($rules, $ability_name, $bulk_action);
+    }
+
+    novamira_update_ability_rules($rules);
+    wp_safe_redirect(admin_url('admin.php?page=novamira-abilities&novamira_result=bulk_updated'));
+    exit();
+}
+
+function novamira_get_ability_hub_bulk_action(): string
+{
+    $top_action = is_string($_POST['bulk_action'] ?? null) ? sanitize_key(wp_unslash($_POST['bulk_action'])) : '';
+    $bottom_action = is_string($_POST['bulk_action2'] ?? null) ? sanitize_key(wp_unslash($_POST['bulk_action2'])) : '';
+    $action = $top_action !== '-1' && $top_action !== '' ? $top_action : $bottom_action;
+
+    return in_array($action, ['enable', 'disable'], strict: true) ? $action : '';
+}
+
+/**
+ * @return list<string>
+ */
+function novamira_get_ability_hub_bulk_ability_names(): array
+{
+    $raw_names = is_array($_POST['ability_names'] ?? null) ? $_POST['ability_names'] : [];
+
+    $ability_names = [];
+    foreach ($raw_names as $raw_name) {
+        if (!is_string($raw_name)) {
+            continue;
+        }
+        $ability_name = sanitize_text_field(wp_unslash($raw_name));
+        if (!novamira_is_valid_ability_name($ability_name) || novamira_ability_is_hub_hidden($ability_name)) {
+            continue;
+        }
+        $ability_names[] = $ability_name;
+    }
+
+    return array_values(array_unique($ability_names));
+}
+
+/**
+ * @param array<string, array{disabled: bool}> $rules
+ * @return array<string, array{disabled: bool}>
+ */
+function novamira_apply_ability_hub_bulk_action_to_rules(array $rules, string $ability_name, string $action): array
+{
+    if (novamira_ability_is_hub_protected($ability_name)) {
+        return $rules;
+    }
+
+    if ($action === 'enable') {
+        $rules[$ability_name]['disabled'] = false;
+        return $rules;
+    }
+
+    if ($action === 'disable') {
+        $rules[$ability_name]['disabled'] = true;
+    }
+
+    return $rules;
+}
+
+/**
+ * @param array<string, array{disabled: bool}> $rules
+ * @return array<string, array{disabled: bool}>
+ */
+function novamira_apply_ability_hub_action_to_rules(array $rules, string $ability_name, string $action): array
+{
+    if ($action === 'toggle_disabled') {
+        return novamira_toggle_ability_disabled_rule($rules, $ability_name);
+    }
+
+    return $rules;
+}
+
+/**
+ * @param array<string, array{disabled: bool}> $rules
+ * @return array<string, array{disabled: bool}>
+ */
+function novamira_toggle_ability_disabled_rule(array $rules, string $ability_name): array
+{
+    if (novamira_ability_is_hub_protected($ability_name)) {
+        return $rules;
+    }
+
+    $rules[$ability_name]['disabled'] = !$rules[$ability_name]['disabled'];
+    return $rules;
 }
 
 function novamira_handle_sandbox_actions()
@@ -329,44 +639,369 @@ function novamira_render_settings_page()
         return;
     }
 
-    $ability_groups = novamira_collect_public_abilities();
+    $ability_groups = novamira_collect_ability_hub_rows();
+    $result = is_string($_GET['novamira_result'] ?? null) ? sanitize_key(wp_unslash($_GET['novamira_result'])) : null;
     ?>
     <?php novamira_render_admin_header(); ?>
-    <div class="wrap">
-        <h1><?php esc_html_e('AI Abilities', domain: 'novamira'); ?></h1>
-        <p><?php printf(
-            /* translators: %s: link to the Configuration page */
-            esc_html__(
-                'These MCP tools are exposed to AI agents when AI Abilities are enabled on the %s page.',
+    <div
+        class="wrap novamira-hub"
+        data-alloff-label="<?php esc_attr_e('All disabled', domain: 'novamira'); ?>"
+        data-confirm-disable="<?php esc_attr_e(
+            'Disable the %d selected abilities? You can re-enable them anytime.',
+            domain: 'novamira',
+        ); ?>"
+    >
+        <div class="wrap-title">
+            <div>
+                <h1><?php esc_html_e('Abilities Hub', domain: 'novamira'); ?></h1>
+                <p class="description"><?php printf(
+                    /* translators: %s: link to the Configuration page */
+                    esc_html__(
+                        'Manage every ability exposed to AI agents. This lists abilities registered by Novamira and any other plugin that uses the WordPress Abilities API, grouped by provider. Disabled abilities are removed from registry discovery and MCP execution while AI Abilities are enabled on the %s page.',
+                        domain: 'novamira',
+                    ),
+                    '<a href="'
+                    . esc_url(admin_url('admin.php?page=novamira-connect'))
+                    . '">'
+                    . esc_html__('Configuration', domain: 'novamira')
+                    . '</a>',
+                ); ?></p>
+            </div>
+        </div>
+        <?php novamira_render_ability_hub_result_notice($result); ?>
+        <?php if ($ability_groups === []): ?>
+            <div class="notice notice-info"><p><?php esc_html_e(
+                'No abilities are currently registered.',
                 domain: 'novamira',
-            ),
-            '<a href="'
-            . esc_url(admin_url('admin.php?page=novamira-connect'))
-            . '">'
-            . esc_html__('Configuration', domain: 'novamira')
-            . '</a>',
-        ); ?></p>
+            ); ?></p></div>
+        <?php endif; ?>
+        <?php if ($ability_groups !== []): ?>
+            <form id="novamira-abilities-bulk" method="post">
+                <?php wp_nonce_field('novamira_ability_hub_action'); ?>
+                <input type="hidden" name="novamira_ability_hub_action" value="bulk_update" />
+            </form>
+            <?php novamira_render_ability_bulk_actions('top'); ?>
+        <?php endif; ?>
+        <?php $expanded_source = array_key_first($ability_groups); ?>
+        <?php $seen_core = false; ?>
+        <?php $divider_done = false; ?>
         <?php foreach ($ability_groups as $source => $abilities): ?>
-            <h3 style="margin-top:1.5em;"><?php echo esc_html($source); ?></h3>
-            <table class="wp-list-table widefat fixed striped">
-                <thead>
-                    <tr>
-                        <th style="width:260px;"><?php esc_html_e('Ability', domain: 'novamira'); ?></th>
-                        <th style="width:140px;"><?php esc_html_e('Category', domain: 'novamira'); ?></th>
-                        <th><?php esc_html_e('Description', domain: 'novamira'); ?></th>
-                    </tr>
-                </thead>
-                <tbody>
-                    <?php foreach ($abilities as $ability): ?>
-                        <tr>
-                            <td><code><?php echo esc_html($ability['name']); ?></code></td>
-                            <td><?php echo esc_html($ability['category']); ?></td>
-                            <td><?php echo esc_html($ability['description']); ?></td>
-                        </tr>
-                    <?php endforeach; ?>
-                </tbody>
-            </table>
+            <?php $is_core = novamira_ability_hub_group_rank($source) === 0; ?>
+            <?php if (!$is_core && $seen_core && !$divider_done): ?>
+                <?php novamira_render_ability_other_plugins_divider(); ?>
+                <?php $divider_done = true; ?>
+            <?php endif; ?>
+            <?php $seen_core = $seen_core || $is_core; ?>
+            <?php novamira_render_ability_group_section($source, $abilities, $expanded_source); ?>
         <?php endforeach; ?>
+        <?php if ($ability_groups !== []): ?>
+            <?php novamira_render_ability_bulk_actions('bottom'); ?>
+        <?php endif; ?>
+    </div>
+    <?php
+}
+
+function novamira_render_ability_hub_result_notice(?string $result): void
+{
+    $notice = match ($result) {
+        'updated' => ['success', __('Ability rule updated.', domain: 'novamira')],
+        'bulk_updated' => ['success', __('Ability rules updated.', domain: 'novamira')],
+        'invalid' => ['error', __('Invalid ability name.', domain: 'novamira')],
+        default => null,
+    };
+
+    if ($notice === null) {
+        return;
+    }
+    ?>
+    <div class="<?php echo esc_attr('notice notice-' . $notice[0] . ' is-dismissible'); ?>">
+        <p><?php echo esc_html($notice[1]); ?></p>
+    </div>
+    <?php
+}
+
+/**
+ * Divider that separates Novamira's own abilities from those registered by
+ * other plugins, so a provider like "jet-engine" reads clearly as the plugin's.
+ */
+function novamira_render_ability_other_plugins_divider(): void
+{ ?>
+    <h2 class="novamira-hub-divider"><?php esc_html_e('Registered by other plugins', domain: 'novamira'); ?></h2>
+    <?php }
+
+/**
+ * @param list<array{name: string, label: string, description: string, category: string, mcp: string, mcp_type: string, status: string, disabled: bool, protected: bool}> $abilities
+ * @param string|null $expanded_source Group key that should render expanded.
+ */
+function novamira_render_ability_group_section(string $source, array $abilities, ?string $expanded_source): void
+{ ?>
+    <details class="novamira-hub-section"<?php echo $source === $expanded_source ? ' open' : ''; ?>>
+        <summary class="novamira-hub-header">
+            <?php novamira_render_ability_select_all(sprintf(
+                /* translators: %s: provider name */
+                __('Select all abilities from %s', domain: 'novamira'),
+                $source,
+            )); ?>
+            <h2><?php echo esc_html($source); ?>
+                <?php novamira_render_ability_header_meta($abilities); ?>
+            </h2>
+        </summary>
+        <?php novamira_render_ability_group_body($abilities); ?>
+    </details>
+    <?php }
+
+/**
+ * Render a section header's count and, when every ability in it is disabled, an
+ * "All disabled" pill. The count shows `enabled / total` while some are off and
+ * the bare total when all are enabled. hub.js keeps both in sync after an
+ * AJAX toggle.
+ *
+ * @param list<array{name: string, label: string, description: string, category: string, mcp: string, mcp_type: string, status: string, disabled: bool, protected: bool}> $abilities
+ */
+function novamira_render_ability_header_meta(array $abilities): void
+{
+    $total = count($abilities);
+    $enabled = 0;
+    foreach ($abilities as $ability) {
+        if ($ability['disabled']) {
+            continue;
+        }
+        $enabled++;
+    }
+    ?>
+    <span class="count"><?php echo
+        esc_html($enabled === $total ? (string) $total : $enabled . ' / ' . $total)
+    ; ?></span>
+    <?php if ($enabled === 0 && $total > 0): ?>
+        <span class="pill status is-disabled novamira-hub-alloff"><?php
+
+        esc_html_e('All disabled', domain: 'novamira'); ?></span>
+    <?php endif; ?>
+    <?php
+}
+
+/**
+ * Render the "select all" checkbox shown in a provider or category header. It
+ * toggles every row checkbox within its section client-side (see hub.js); the
+ * actual enable/disable still goes through the existing bulk action + nonce.
+ */
+function novamira_render_ability_select_all(string $label): void
+{ ?>
+    <label class="novamira-hub-select-all">
+        <span class="screen-reader-text"><?php echo esc_html($label); ?></span>
+        <input type="checkbox" class="novamira-hub-select-all-input" />
+    </label>
+    <?php }
+
+/**
+ * Render a provider group's body: category sub-sections when there is more than
+ * one category, otherwise a flat row list.
+ *
+ * @param list<array{name: string, label: string, description: string, category: string, mcp: string, mcp_type: string, status: string, disabled: bool, protected: bool}> $abilities
+ */
+function novamira_render_ability_group_body(array $abilities): void
+{
+    $by_category = novamira_group_abilities_by_category($abilities);
+    if (count($by_category) > 1) {
+        foreach ($by_category as $category => $rows) {
+            novamira_render_ability_category_subsection($category, $rows);
+        }
+        return;
+    }
+    ?>
+    <div class="novamira-hub-rows">
+        <?php foreach ($abilities as $ability): ?>
+            <?php novamira_render_ability_hub_row($ability); ?>
+        <?php endforeach; ?>
+    </div>
+    <?php
+}
+
+/**
+ * Group hub rows by their category label. Uncategorized rows sort last.
+ *
+ * @param list<array{name: string, label: string, description: string, category: string, mcp: string, mcp_type: string, status: string, disabled: bool, protected: bool}> $abilities
+ * @return array<string, list<array{name: string, label: string, description: string, category: string, mcp: string, mcp_type: string, status: string, disabled: bool, protected: bool}>>
+ */
+function novamira_group_abilities_by_category(array $abilities): array
+{
+    $groups = [];
+    foreach ($abilities as $ability) {
+        $groups[$ability['category']][] = $ability;
+    }
+
+    uksort($groups, static function (string $a, string $b): int {
+        if ($a === '' || $b === '') {
+            return $a === '' ? 1 : -1;
+        }
+        return strcasecmp($a, $b);
+    });
+
+    return $groups;
+}
+
+/**
+ * @param list<array{name: string, label: string, description: string, category: string, mcp: string, mcp_type: string, status: string, disabled: bool, protected: bool}> $rows
+ */
+function novamira_render_ability_category_subsection(string $category, array $rows): void
+{
+    $label = $category !== '' ? $category : __('Other', domain: 'novamira');
+    ?>
+    <details class="novamira-hub-subsection">
+        <summary class="novamira-hub-subheader">
+            <?php novamira_render_ability_select_all(sprintf(
+                /* translators: %s: category name */
+                __('Select all abilities in %s', domain: 'novamira'),
+                $label,
+            )); ?>
+            <h3><?php echo esc_html($label); ?>
+                <?php novamira_render_ability_header_meta($rows); ?>
+            </h3>
+        </summary>
+        <div class="novamira-hub-rows">
+            <?php foreach ($rows as $ability): ?>
+                <?php novamira_render_ability_hub_row($ability); ?>
+            <?php endforeach; ?>
+        </div>
+    </details>
+    <?php
+}
+
+/**
+ * @param array{name: string, label: string, description: string, category: string, mcp: string, mcp_type: string, status: string, disabled: bool, protected: bool} $ability
+ */
+function novamira_render_ability_hub_row(array $ability): void
+{
+    $row_class = 'novamira-hub-row ' . ($ability['disabled'] ? 'is-off' : 'is-on');
+    $row_class .= $ability['protected'] ? ' is-protected' : '';
+    ?>
+    <div class="<?php echo esc_attr($row_class); ?>">
+        <label class="novamira-hub-select">
+            <span class="screen-reader-text"><?php echo
+                esc_html(sprintf(
+                    /* translators: %s: ability name */
+                    __('Select %s', domain: 'novamira'),
+                    $ability['name'],
+                ))
+            ; ?></span>
+            <input
+                type="checkbox"
+                name="ability_names[]"
+                value="<?php echo esc_attr($ability['name']); ?>"
+                form="novamira-abilities-bulk"
+            />
+        </label>
+
+        <?php novamira_render_ability_hub_main($ability); ?>
+
+        <?php novamira_render_ability_hub_pills($ability); ?>
+        <?php novamira_render_ability_toggle_action($ability); ?>
+    </div>
+    <?php
+}
+
+/**
+ * Render the ability's slug and description. When a description is available the
+ * row becomes expandable (CSS-only <details>) to reveal the full text and its
+ * safety annotations; placeholder rows without a description stay flat.
+ *
+ * @param array{name: string, label: string, description: string, category: string, mcp: string, mcp_type: string, status: string, disabled: bool, protected: bool} $ability
+ */
+function novamira_render_ability_hub_main(array $ability): void
+{
+    if ($ability['description'] === '') {
+        ?>
+        <div class="novamira-hub-main novamira-hub-main--plain">
+            <span class="slug" title="<?php echo esc_attr($ability['name']); ?>"><?php echo
+                esc_html(novamira_ability_display_slug($ability['name']))
+            ; ?></span>
+            <span class="desc"><?php echo esc_html($ability['label']); ?></span>
+        </div>
+        <?php
+
+        return;
+    }
+    ?>
+    <details class="novamira-hub-main">
+        <summary class="novamira-hub-summary">
+            <span class="slug" title="<?php echo esc_attr($ability['name']); ?>"><?php echo
+                esc_html(novamira_ability_display_slug($ability['name']))
+            ; ?></span>
+            <span class="desc"><?php echo esc_html($ability['description']); ?></span>
+        </summary>
+        <div class="novamira-hub-detail">
+            <p class="desc-full"><?php echo esc_html($ability['description']); ?></p>
+        </div>
+    </details>
+    <?php
+}
+
+/**
+ * @param array{name: string, label: string, description: string, category: string, mcp: string, mcp_type: string, status: string, disabled: bool, protected: bool} $ability
+ */
+function novamira_render_ability_hub_pills(array $ability): void
+{ ?>
+    <div class="novamira-hub-pills">
+        <?php if (in_array($ability['mcp_type'], ['prompt', 'resource'], strict: true)): ?>
+            <span class="pill mcp"><?php echo esc_html($ability['mcp']); ?></span>
+        <?php endif; ?>
+        <span class="<?php echo esc_attr('pill status ' . ($ability['disabled'] ? 'is-disabled' : 'is-enabled')); ?>">
+            <?php echo esc_html($ability['status']); ?>
+        </span>
+        <?php if ($ability['protected']): ?>
+            <span class="pill protected"><?php esc_html_e('Protected', domain: 'novamira'); ?></span>
+        <?php endif; ?>
+    </div>
+    <?php }
+
+/**
+ * @param array{name: string, label: string, description: string, category: string, mcp: string, mcp_type: string, status: string, disabled: bool, protected: bool} $ability
+ */
+function novamira_render_ability_toggle_action(array $ability): void
+{ ?>
+    <div class="novamira-hub-actions">
+        <?php if (!$ability['protected']): ?>
+            <form method="post">
+                <?php wp_nonce_field('novamira_ability_hub_action'); ?>
+                <input type="hidden" name="novamira_ability_hub_action" value="toggle_disabled" />
+                <input type="hidden" name="ability_name" value="<?php echo esc_attr($ability['name']); ?>" />
+                <button type="submit" class="action-btn">
+                    <?php echo
+                        esc_html(
+                            $ability['disabled'] ? __('Enable', domain: 'novamira') : __('Disable', domain: 'novamira'),
+                        )
+                    ; ?>
+                </button>
+            </form>
+        <?php endif; ?>
+    </div>
+    <?php }
+
+function novamira_render_ability_bulk_actions(string $position): void
+{
+    $suffix = $position === 'bottom' ? '2' : '';
+    ?>
+    <div class="tablenav <?php echo esc_attr($position); ?>">
+        <div class="alignleft actions bulkactions">
+            <label for="<?php echo
+                esc_attr('novamira-bulk-action-selector-' . $position)
+            ; ?>" class="screen-reader-text">
+                <?php esc_html_e('Select bulk action', domain: 'novamira'); ?>
+            </label>
+            <select
+                name="<?php echo esc_attr('bulk_action' . $suffix); ?>"
+                id="<?php echo esc_attr('novamira-bulk-action-selector-' . $position); ?>"
+                form="novamira-abilities-bulk"
+            >
+                <option value="-1"><?php esc_html_e('Bulk actions', domain: 'novamira'); ?></option>
+                <option value="enable"><?php esc_html_e('Enable', domain: 'novamira'); ?></option>
+                <option value="disable"><?php esc_html_e('Disable', domain: 'novamira'); ?></option>
+            </select>
+            <button type="submit" class="button action" form="novamira-abilities-bulk">
+                <?php esc_html_e('Apply', domain: 'novamira'); ?>
+            </button>
+        </div>
+        <br class="clear" />
     </div>
     <?php
 }

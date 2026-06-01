@@ -32,7 +32,7 @@ function current_user_can_manage(): bool
 /**
  * Skills lives as a submenu under the Novamira top-level menu registered
  * in `novamira.php`. The parent slug `novamira-connect` is the canonical
- * Configuration page. Skills sits directly after AI Abilities; ordering
+ * Configuration page. Skills sits directly after Abilities Hub; ordering
  * is fixed in `reorder_submenu()` below because `add_submenu_page` only
  * appends, and we want a specific position rather than the tail of the
  * Novamira submenu.
@@ -50,8 +50,8 @@ function register_menu(): void
 }
 
 /**
- * Reposition the Skills submenu entry to sit immediately after AI
- * Abilities (slug `novamira`) inside the Novamira menu group. Runs at a
+ * Reposition the Skills submenu entry to sit immediately after Abilities
+ * Hub (slug `novamira`) inside the Novamira menu group. Runs at a
  * priority higher than any caller of `add_submenu_page` for that parent.
  */
 // @mago-expect lint:no-global
@@ -81,7 +81,7 @@ function reorder_submenu(): void
     $inserted = false;
     foreach ($entries as $entry) {
         $reordered[] = $entry;
-        if (!$inserted && ($entry[2] ?? null) === 'novamira') {
+        if (!$inserted && ($entry[2] ?? null) === 'novamira-abilities') {
             $reordered[] = $skills_entry;
             $inserted = true;
         }

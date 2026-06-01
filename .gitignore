@@ -6,6 +6,9 @@
 .idea
 .vscode
 
+# Codex 
+.codex
+
 # Internal docs
 /docs/
 

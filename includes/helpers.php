@@ -655,6 +655,123 @@ function novamira_manage_capability(): string
 }
 
 /**
+ * Return the persisted per-ability hub rules.
+ *
+ * @return array<string, array{disabled: bool}>
+ */
+function novamira_get_ability_rules(): array
+{
+    /** @var mixed $stored */
+    $stored = get_option('novamira_ability_rules', default_value: []);
+    if (!is_array($stored)) {
+        return [];
+    }
+
+    $rules = [];
+    // @mago-expect analysis:mixed-assignment
+    foreach ($stored as $ability_name => $rule) {
+        if (!is_string($ability_name) || !is_array($rule) || !novamira_is_valid_ability_name($ability_name)) {
+            continue;
+        }
+        $rules[$ability_name] = [
+            'disabled' => in_array($rule['disabled'] ?? false, [true, '1', 1], strict: true),
+        ];
+    }
+
+    return $rules;
+}
+
+/**
+ * Persist the per-ability hub rules.
+ *
+ * @param array<string, array{disabled?: bool}> $rules
+ */
+function novamira_update_ability_rules(array $rules): void
+{
+    $clean = [];
+    foreach ($rules as $ability_name => $rule) {
+        if (!novamira_is_valid_ability_name($ability_name)) {
+            continue;
+        }
+        if (!($rule['disabled'] ?? false)) {
+            continue;
+        }
+        $clean[$ability_name] = ['disabled' => true];
+    }
+
+    update_option('novamira_ability_rules', $clean, autoload: false);
+}
+
+function novamira_is_valid_ability_name(string $ability_name): bool
+{
+    return preg_match('/^[a-z0-9-]+\/[a-z0-9-\/]+$/', $ability_name) === 1;
+}
+
+function novamira_ability_is_hub_protected(string $ability_name): bool
+{
+    return str_starts_with($ability_name, 'mcp-adapter/');
+}
+
+/**
+ * Whether the current request is rendering the Abilities Hub admin screen.
+ *
+ * The Hub manages every ability, disabled ones included, so it must see the
+ * full registry; the disable policy is therefore not enforced while it renders.
+ */
+function novamira_is_ability_hub_screen(): bool
+{
+    if (!is_admin()) {
+        return false;
+    }
+
+    $page = is_string($_GET['page'] ?? null) ? sanitize_key(wp_unslash($_GET['page'])) : '';
+
+    return $page === 'novamira-abilities';
+}
+
+/**
+ * Apply persisted Abilities Hub rules after all providers have registered.
+ */
+function novamira_apply_ability_policy(): void
+{
+    if (!function_exists('wp_get_abilities') || !function_exists('wp_unregister_ability')) {
+        return;
+    }
+
+    // The Hub screen lists disabled abilities with their full metadata, so do not
+    // unregister them there. Enforcement still runs on REST/MCP and front-end
+    // requests, which is where ability exposure actually matters.
+    if (novamira_is_ability_hub_screen()) {
+        return;
+    }
+
+    $rules = novamira_get_ability_rules();
+    if ($rules === []) {
+        return;
+    }
+
+    foreach (wp_get_abilities() as $ability) {
+        novamira_apply_ability_policy_rule($ability, $rules);
+    }
+}
+
+/**
+ * @param array<string, array{disabled: bool}> $rules
+ */
+function novamira_apply_ability_policy_rule(WP_Ability $ability, array $rules): void
+{
+    $ability_name = $ability->get_name();
+    $rule = $rules[$ability_name] ?? null;
+    if ($rule === null) {
+        return;
+    }
+
+    if ($rule['disabled'] && !novamira_ability_is_hub_protected($ability_name)) {
+        wp_unregister_ability($ability_name);
+    }
+}
+
+/**
  * Handle the dismiss-production-warning form submission. Called from admin_init.
  */
 function novamira_handle_dismiss_production_warning(): void
@@ -757,6 +874,10 @@ function novamira_get_datetime_format($fallback = 'Y-m-d H:i:s')
  */
 function novamira_permission_callback()
 {
+    if (!novamira_is_enabled()) {
+        return false;
+    }
+
     return novamira_current_user_can_manage();
 }
 

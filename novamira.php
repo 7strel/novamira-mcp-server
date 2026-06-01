@@ -156,7 +156,10 @@ function novamira_render_mcp_dependency_notice(): void
     }
 
     $page = $_GET['page'] ?? null;
-    if (is_string($page) && in_array($page, ['novamira-connect', 'novamira', 'novamira-sandbox'], strict: true)) {
+    if (
+        is_string($page)
+        && in_array($page, ['novamira-connect', 'novamira-abilities', 'novamira-sandbox'], strict: true)
+    ) {
         return;
     }
 
@@ -464,19 +467,40 @@ add_action('admin_init', static function () {
         novamira_handle_revoke_password();
         novamira_handle_dismiss_production_warning();
     }
+    if ($page === 'novamira-abilities') {
+        novamira_handle_ability_hub_actions();
+    }
 });
 
-// Sandbox admin page stylesheet — card layout matching Skills.
+// Single-row toggle over AJAX so the page state (open sections) is preserved.
+add_action('wp_ajax_novamira_toggle_ability', callback: 'novamira_handle_ability_toggle_ajax');
+
+// Admin page stylesheets — card layouts matching Skills.
 add_action('admin_enqueue_scripts', static function (string $hook): void {
-    if ($hook !== 'novamira_page_novamira-sandbox') {
-        return;
+    if ($hook === 'novamira_page_novamira-abilities') {
+        wp_enqueue_style(
+            'novamira-hub-admin',
+            (string) NOVAMIRA_PLUGIN_URL . 'includes/assets/hub.css',
+            [],
+            NOVAMIRA_VERSION,
+        );
+        wp_enqueue_script(
+            'novamira-hub-admin',
+            (string) NOVAMIRA_PLUGIN_URL . 'includes/assets/hub.js',
+            [],
+            NOVAMIRA_VERSION,
+            args: true,
+        );
     }
-    wp_enqueue_style(
-        'novamira-sandbox-admin',
-        (string) NOVAMIRA_PLUGIN_URL . 'includes/assets/sandbox.css',
-        [],
-        NOVAMIRA_VERSION,
-    );
+
+    if ($hook === 'novamira_page_novamira-sandbox') {
+        wp_enqueue_style(
+            'novamira-sandbox-admin',
+            (string) NOVAMIRA_PLUGIN_URL . 'includes/assets/sandbox.css',
+            [],
+            NOVAMIRA_VERSION,
+        );
+    }
 });
 
 // Register admin menus.
@@ -502,13 +526,13 @@ add_action('admin_menu', static function () {
         callback: 'novamira_render_connect_page',
     );
 
-    // AI Abilities sub-page.
+    // Abilities Hub sub-page.
     add_submenu_page(
         parent_slug: 'novamira-connect',
-        page_title: __('AI Abilities', domain: 'novamira'),
-        menu_title: __('AI Abilities', domain: 'novamira'),
+        page_title: __('Abilities Hub', domain: 'novamira'),
+        menu_title: __('Abilities Hub', domain: 'novamira'),
         capability: novamira_manage_capability(),
-        menu_slug: 'novamira',
+        menu_slug: 'novamira-abilities',
         callback: 'novamira_render_settings_page',
     );
 
@@ -791,6 +815,8 @@ if ($is_enabled) {
         novamira_load_gutenberg_abilities();
     });
 }
+
+add_action('wp_abilities_api_init', callback: 'novamira_apply_ability_policy', priority: PHP_INT_MAX);
 
 // Ensure sandbox directory exists.
 wp_mkdir_p(NOVAMIRA_SANDBOX_DIR);
