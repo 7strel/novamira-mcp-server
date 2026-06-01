@@ -51,7 +51,7 @@ function register_menu(): void
 
 /**
  * Reposition the Skills submenu entry to sit immediately after Abilities
- * Hub (slug `novamira`) inside the Novamira menu group. Runs at a
+ * Hub (slug `novamira-abilities`) inside the Novamira menu group. Runs at a
  * priority higher than any caller of `add_submenu_page` for that parent.
  */
 // @mago-expect lint:no-global
